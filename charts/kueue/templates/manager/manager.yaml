@@ -86,6 +86,8 @@ spec:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert
           readOnly: true
+        - mountPath: /tmp
+          name: tmp
         - mountPath: /visibility
           name: visibility
         - mountPath: /controller_manager_config.yaml
@@ -121,6 +123,8 @@ spec:
         secret:
           defaultMode: 420
           secretName: {{ include "kueue.fullname" . }}-webhook-server-cert
+      - name: tmp
+        emptyDir: {}
       - name: manager-config
         configMap:
           name: {{ include "kueue.fullname" . }}-manager-config
