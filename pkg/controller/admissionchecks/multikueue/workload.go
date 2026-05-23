@@ -699,9 +699,11 @@ func (w *wlReconciler) syncToSingleCluster(ctx context.Context, log klog.Logger,
 // nominatedClusterSetsEqual reports whether stored and current contain the same set of cluster names,
 // independent of order.
 func nominatedClusterSetsEqual(stored, current []string) bool {
-	slices.Sort(stored)
-	slices.Sort(current)
-	return slices.Equal(stored, current)
+	storedCopy := slices.Clone(stored)
+	currentCopy := slices.Clone(current)
+	slices.Sort(storedCopy)
+	slices.Sort(currentCopy)
+	return slices.Equal(storedCopy, currentCopy)
 }
 
 func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group *wlGroup) (reconcile.Result, error) {
