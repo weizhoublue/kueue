@@ -1777,6 +1777,19 @@ var _ = ginkgo.Describe("Workload v1beta1 CEL validation", func() {
 				},
 				utiltesting.BeInvalidError(),
 			),
+			ginkgo.Entry("can't remove priorityClassSource via v1beta1 when QuotaReserved=true",
+				func() *kueue.Workload {
+					return utiltestingapi.MakeWorkload(workloadName, ns.Name).
+						PodPriorityClassRef("default").
+						Priority(0).
+						Obj()
+				},
+				true,
+				func(newWL *kueuev1beta1.Workload) {
+					newWL.Spec.PriorityClassSource = ""
+				},
+				utiltesting.BeInvalidError(),
+			),
 			ginkgo.Entry("can change priorityClassSource via v1beta1 when QuotaReserved=false",
 				func() *kueue.Workload {
 					return utiltestingapi.MakeWorkload(workloadName, ns.Name).
@@ -1813,6 +1826,19 @@ var _ = ginkgo.Describe("Workload v1beta1 CEL validation", func() {
 				true,
 				func(newWL *kueuev1beta1.Workload) {
 					newWL.Spec.PriorityClassName = "other"
+				},
+				utiltesting.BeInvalidError(),
+			),
+			ginkgo.Entry("can't remove priorityClassName via v1beta1 when QuotaReserved=true and source is pod priorityClass",
+				func() *kueue.Workload {
+					return utiltestingapi.MakeWorkload(workloadName, ns.Name).
+						PodPriorityClassRef("default").
+						Priority(0).
+						Obj()
+				},
+				true,
+				func(newWL *kueuev1beta1.Workload) {
+					newWL.Spec.PriorityClassName = ""
 				},
 				utiltesting.BeInvalidError(),
 			),
