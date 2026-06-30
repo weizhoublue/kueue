@@ -223,7 +223,7 @@ run: compile-crd-manifests generate fmt vet ## Run a controller from your host.
 .PHONY: image-local-build
 image-local-build:
 	BUILDER=$(shell $(DOCKER_BUILDX_CMD) create --use)
-	$(MAKE) image-build PUSH="$(PUSH)" IMAGE_BUILD_EXTRA_OPTS="$(IMAGE_BUILD_EXTRA_OPTS)"
+	$(MAKE) image-build PUSH="$(PUSH)" IMAGE_BUILD_EXTRA_OPTS="$(IMAGE_BUILD_EXTRA_OPTS)" IMAGE_BUILD_CMD="$(subst ",\",$(IMAGE_BUILD_CMD))"
 	$(DOCKER_BUILDX_CMD) rm $$BUILDER
 
 # Build the multiplatform container image locally and push to repo.
@@ -479,6 +479,7 @@ kueue-populator-image-build:
 	$(MAKE) -C cmd/experimental/kueue-populator image-build \
 		IMAGE_REGISTRY=$(IMAGE_REGISTRY) \
 		IMAGE_TAG=$(IMAGE_TAG_KUEUE_POPULATOR) \
+		IMAGE_BUILD_CMD="$(subst ",\",$(IMAGE_BUILD_CMD))" \
 		PLATFORMS="$(PLATFORMS)" \
 		BASE_IMAGE=$(BASE_IMAGE) \
 		BUILDER_IMAGE=$(BUILDER_IMAGE) \
@@ -503,6 +504,7 @@ kueue-priority-booster-image-build:
 	$(MAKE) -C cmd/experimental/kueue-priority-booster image-build \
 		IMAGE_REGISTRY=$(IMAGE_REGISTRY) \
 		IMAGE_TAG=$(IMAGE_TAG_KUEUE_PRIORITY_BOOSTER) \
+		IMAGE_BUILD_CMD="$(subst ",\",$(IMAGE_BUILD_CMD))" \
 		PLATFORMS="$(PLATFORMS)" \
 		BASE_IMAGE=$(BASE_IMAGE) \
 		BUILDER_IMAGE=$(BUILDER_IMAGE) \
