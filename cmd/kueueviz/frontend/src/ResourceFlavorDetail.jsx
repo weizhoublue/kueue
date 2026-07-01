@@ -115,23 +115,27 @@ const ResourceFlavorDetail = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {sortedQueues.map((queue) => (
-                  <React.Fragment key={queue.queueName}>
-                    <TableRow>
-                      <TableCell rowSpan={queue.quota.length}>
-                        <Link to={`/cluster-queue/${queue.queueName}`}>{queue.queueName}</Link>
-                      </TableCell>
-                      <TableCell>{queue.quota[0].resource}</TableCell>
-                      <TableCell>{queue.quota[0].nominalQuota}</TableCell>
-                    </TableRow>
-                    {queue.quota.slice(1)?.map((resource, index) => (
-                      <TableRow key={`${queue.queueName}-${resource.resource}-${index}`}>
-                        <TableCell>{resource.resource}</TableCell>
-                        <TableCell>{resource.nominalQuota}</TableCell>
+                {sortedQueues.map((queue) => {
+                  const quota = queue.quota || [];
+
+                  return (
+                    <React.Fragment key={queue.queueName}>
+                      <TableRow>
+                        <TableCell rowSpan={quota.length || 1}>
+                          <Link to={`/cluster-queue/${queue.queueName}`}>{queue.queueName}</Link>
+                        </TableCell>
+                        <TableCell>{quota[0]?.resource || 'N/A'}</TableCell>
+                        <TableCell>{quota[0]?.nominalQuota || 'N/A'}</TableCell>
                       </TableRow>
-                    ))}
-                  </React.Fragment>
-                ))}
+                      {quota.slice(1).map((resource, index) => (
+                        <TableRow key={`${queue.queueName}-${resource.resource}-${index}`}>
+                          <TableCell>{resource.resource}</TableCell>
+                          <TableCell>{resource.nominalQuota}</TableCell>
+                        </TableRow>
+                      ))}
+                    </React.Fragment>
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>
