@@ -141,6 +141,28 @@ func TestFetchWorkloadsDashboardDataKeepsPodsNamespaceScoped(t *testing.T) {
 	}
 }
 
+func TestFetchWorkloadsDashboardDataSkipsPodsForWorkloadWithoutJobUID(t *testing.T) {
+	client := &fakeDashboardClient{
+		workloads: []kueueapi.Workload{
+			makeDashboardWorkloadWithoutJobUID("wl-1", "ns-1", "wl-uid-1"),
+		},
+		pods: []corev1.Pod{
+			makeDashboardPodWithoutControllerUID("pod-1", "ns-1"),
+		},
+	}
+	h := &Handlers{client: client}
+
+	got, err := h.fetchWorkloadsDashboardData(t.Context(), "ns-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	items := dashboardWorkloadItems(t, got)
+	if got := len(items[0].Pods); got != 0 {
+		t.Fatalf("workload %s has %d pods, want 0", items[0].Name, got)
+	}
+}
+
 func dashboardWorkloadItems(t *testing.T, got any) []workloadResult {
 	t.Helper()
 
@@ -168,6 +190,16 @@ func makeDashboardWorkload(name, namespace, uid, jobUID string) kueueapi.Workloa
 	}
 }
 
+func makeDashboardWorkloadWithoutJobUID(name, namespace, uid string) kueueapi.Workload {
+	return kueueapi.Workload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID(uid),
+		},
+	}
+}
+
 func makeDashboardPod(name, namespace, controllerUID string) corev1.Pod {
 	return corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -176,6 +208,15 @@ func makeDashboardPod(name, namespace, controllerUID string) corev1.Pod {
 			Labels: map[string]string{
 				"controller-uid": controllerUID,
 			},
+		},
+	}
+}
+
+func makeDashboardPodWithoutControllerUID(name, namespace string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
 		},
 	}
 }

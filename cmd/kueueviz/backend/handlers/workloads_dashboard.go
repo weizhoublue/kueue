@@ -121,7 +121,10 @@ func (h *Handlers) fetchWorkloadsDashboardData(ctx context.Context, namespace st
 		workloadName := workload.Name
 		workloadUID := workload.UID
 		jobUID := workload.Labels["kueue.x-k8s.io/job-uid"]
-		workloadPods := podsByNamespace[namespace][jobUID]
+		var workloadPods []map[string]any
+		if jobUID != "" {
+			workloadPods = podsByNamespace[namespace][jobUID]
+		}
 
 		cond := meta.FindStatusCondition(workload.Status.Conditions, kueueapi.WorkloadPreempted)
 
