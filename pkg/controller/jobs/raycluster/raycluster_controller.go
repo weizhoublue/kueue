@@ -76,6 +76,7 @@ type RayCluster rayv1.RayCluster
 
 var _ jobframework.GenericJob = (*RayCluster)(nil)
 var _ jobframework.JobWithManagedBy = (*RayCluster)(nil)
+var _ jobframework.JobWithSkip = (*RayCluster)(nil)
 
 func (j *RayCluster) Object() client.Object {
 	return (*rayv1.RayCluster)(j)
@@ -91,6 +92,12 @@ func (j *RayCluster) IsActive() bool {
 
 func (j *RayCluster) Suspend() {
 	j.Spec.Suspend = new(true)
+}
+
+func (j *RayCluster) Skip(context.Context) bool {
+	return features.Enabled(features.DeferRayServiceFinalizationForRedisCleanup) &&
+		!j.DeletionTimestamp.IsZero() &&
+		rayutils.IsGCSFaultToleranceEnabled(&j.Spec, j.Annotations)
 }
 
 func (j *RayCluster) GVK() schema.GroupVersionKind {

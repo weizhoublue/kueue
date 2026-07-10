@@ -315,6 +315,7 @@ func TestReconciler(t *testing.T) {
 
 	cases := map[string]struct {
 		reconcilerOptions []jobframework.Option
+		featureGates      map[featuregate.Feature]bool
 		job               rayv1.RayCluster
 		initObjects       []client.Object
 		workloads         []kueue.Workload
@@ -559,6 +560,72 @@ func TestReconciler(t *testing.T) {
 					Obj(),
 			},
 		},
+		"deleting GCS fault-tolerant RayCluster skips Workload finalization": {
+			featureGates: map[featuregate.Feature]bool{
+				features.DeferRayServiceFinalizationForRedisCleanup: true,
+				features.FinishOrphanedWorkloads:                    true,
+			},
+			job: func() rayv1.RayCluster {
+				job := *baseJobWrapper.Clone().Obj()
+				job.Finalizers = []string{kueue.ResourceInUseFinalizerName}
+				job.DeletionTimestamp = &metav1.Time{Time: now}
+				job.Spec.GcsFaultToleranceOptions = &rayv1.GcsFaultToleranceOptions{RedisAddress: "redis:6379"}
+				return job
+			}(),
+			wantJob: func() rayv1.RayCluster {
+				job := *baseJobWrapper.Clone().Obj()
+				job.Finalizers = []string{kueue.ResourceInUseFinalizerName}
+				job.DeletionTimestamp = &metav1.Time{Time: now}
+				job.Spec.GcsFaultToleranceOptions = &rayv1.GcsFaultToleranceOptions{RedisAddress: "redis:6379"}
+				return job
+			}(),
+			workloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("test", "ns").
+					Finalizers(kueue.ResourceInUseFinalizerName).
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("test", "ns").
+					Finalizers(kueue.ResourceInUseFinalizerName).
+					Obj(),
+			},
+		},
+		"deleting GCS fault-tolerant RayCluster finalizes Workload when defer gate is disabled": {
+			featureGates: map[featuregate.Feature]bool{
+				features.DeferRayServiceFinalizationForRedisCleanup: false,
+				features.FinishOrphanedWorkloads:                    true,
+			},
+			job: func() rayv1.RayCluster {
+				job := *baseJobWrapper.Clone().Obj()
+				job.Finalizers = []string{kueue.ResourceInUseFinalizerName}
+				job.DeletionTimestamp = &metav1.Time{Time: now}
+				job.Spec.GcsFaultToleranceOptions = &rayv1.GcsFaultToleranceOptions{RedisAddress: "redis:6379"}
+				return job
+			}(),
+			wantJob: func() rayv1.RayCluster {
+				job := *baseJobWrapper.Clone().Obj()
+				job.Finalizers = []string{kueue.ResourceInUseFinalizerName}
+				job.DeletionTimestamp = &metav1.Time{Time: now}
+				job.Spec.GcsFaultToleranceOptions = &rayv1.GcsFaultToleranceOptions{RedisAddress: "redis:6379"}
+				return job
+			}(),
+			workloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("test", "ns").
+					Finalizers(kueue.ResourceInUseFinalizerName).
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("test", "ns").
+					Condition(metav1.Condition{
+						Type:               kueue.WorkloadFinished,
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.NewTime(now),
+						Reason:             kueue.WorkloadFinishedReasonOwnerNotFound,
+						Message:            "The workload's owner no longer exists",
+					}).
+					Obj(),
+			},
+		},
 		"RayCluster with NumOfHosts > 1": {
 			initObjects: []client.Object{
 				utiltestingapi.MakeResourceFlavor("unit-test-flavor").NodeLabel(corev1.LabelArchStable, "arm64").Obj(),
@@ -694,6 +761,7 @@ func TestReconciler(t *testing.T) {
 	for name, tc := range cases {
 		for _, enabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s WorkloadRequestUseMergePatch enabled: %t", name, enabled), func(t *testing.T) {
+				features.SetFeatureGatesDuringTest(t, tc.featureGates)
 				features.SetFeatureGateDuringTest(t, features.WorkloadRequestUseMergePatch, enabled)
 				ctx, _ := utiltesting.ContextWithLog(t)
 				clientBuilder := utiltesting.NewClientBuilder(rayv1.AddToScheme).WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: utiltesting.TreatSSAAsStrategicMerge})
