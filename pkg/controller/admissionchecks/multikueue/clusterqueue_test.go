@@ -45,6 +45,41 @@ type workerState struct {
 	inactive bool
 }
 
+func TestUpdateQuotaAutomationConditionUpdatesObservedGeneration(t *testing.T) {
+	ctx, _ := utiltesting.ContextWithLog(t)
+	cq := utiltestingapi.MakeClusterQueue("cq1").
+		Generation(2).
+		Obj()
+	apimeta.SetStatusCondition(&cq.Status.Conditions, metav1.Condition{
+		Type:               kueue.MultiKueueManagerQuotaAutomation,
+		Status:             metav1.ConditionTrue,
+		Reason:             "QuotaAutomated",
+		Message:            "ClusterQueue quota is automatically managed based on MultiKueue workers.",
+		ObservedGeneration: 1,
+	})
+	c := utiltesting.NewClientBuilder().
+		WithObjects(cq).
+		WithStatusSubresource(cq).
+		Build()
+	reconciler := newCQReconciler(c, nil, nil, nil, 0)
+
+	if err := reconciler.updateQuotaAutomationCondition(ctx, cq, metav1.ConditionTrue, "QuotaAutomated", "ClusterQueue quota is automatically managed based on MultiKueue workers."); err != nil {
+		t.Fatalf("updateQuotaAutomationCondition: %v", err)
+	}
+
+	got := &kueue.ClusterQueue{}
+	if err := c.Get(ctx, types.NamespacedName{Name: cq.Name}, got); err != nil {
+		t.Fatalf("getting ClusterQueue: %v", err)
+	}
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, kueue.MultiKueueManagerQuotaAutomation)
+	if condition == nil {
+		t.Fatal("expected quota automation condition")
+	}
+	if condition.ObservedGeneration != 2 {
+		t.Errorf("ObservedGeneration = %d, want 2", condition.ObservedGeneration)
+	}
+}
+
 func TestCQReconcile(t *testing.T) {
 	features.SetFeatureGateDuringTest(t, features.MultiKueueManagerQuotaAutomation, true)
 
