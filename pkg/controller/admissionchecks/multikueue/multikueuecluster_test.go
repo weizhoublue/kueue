@@ -181,6 +181,36 @@ func testKubeconfigInsecure(user string, tokenFile *string) string {
 	return string(kubeconfig)
 }
 
+func TestUpdateStatusUpdatesObservedGeneration(t *testing.T) {
+	ctx, _ := utiltesting.ContextWithLog(t)
+	cluster := utiltestingapi.MakeMultiKueueCluster("worker1").
+		KubeConfig(kueue.SecretLocationType, "worker1").
+		Active(metav1.ConditionTrue, "Active", "Connected", 1).
+		Generation(2).
+		Obj()
+	c := getClientBuilder(ctx).
+		WithObjects(cluster).
+		WithStatusSubresource(cluster).
+		Build()
+	reconciler := newClustersReconciler(c, TestNamespace, 0, defaultOrigin, nil, nil, nil, nil, nil)
+
+	if err := reconciler.updateStatus(ctx, cluster, true, "Active", "Connected"); err != nil {
+		t.Fatalf("updateStatus: %v", err)
+	}
+
+	got := &kueue.MultiKueueCluster{}
+	if err := c.Get(ctx, types.NamespacedName{Name: cluster.Name}, got); err != nil {
+		t.Fatalf("getting MultiKueueCluster: %v", err)
+	}
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, kueue.MultiKueueClusterActive)
+	if condition == nil {
+		t.Fatal("expected active condition")
+	}
+	if condition.ObservedGeneration != 2 {
+		t.Errorf("ObservedGeneration = %d, want 2", condition.ObservedGeneration)
+	}
+}
+
 func TestUpdateConfig(t *testing.T) {
 	ctx, _ := utiltesting.ContextWithLog(t)
 	cancelCalledCount := 0
