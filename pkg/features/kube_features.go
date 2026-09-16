@@ -398,6 +398,7 @@ const (
 	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/8691-concurrent-admission
 	//
 	// Enables Concurrent Admission feature which allows pursuing multiple ResourceFlavors in parallel.
+	// Requires UnadmittedWorkloadsObservability to be enabled.
 	ConcurrentAdmission featuregate.Feature = "ConcurrentAdmission"
 
 	// Enable recording of WorkloadCreationLatency metric.
@@ -678,6 +679,7 @@ var defaultFeatureGateDependencies = map[featuregate.Feature][]featuregate.Featu
 	TASMultiLayerTopology:                           {TopologyAwareScheduling},
 	TASRespectNodeAffinityPreferred:                 {TopologyAwareScheduling},
 	TASGroupedPodSetSlicing:                         {TopologyAwareScheduling},
+	ConcurrentAdmission:                             {UnadmittedWorkloadsObservability},
 	UnadmittedWorkloadsExplicitStatus:               {UnadmittedWorkloadsObservability},
 	TASHandleOverlappingFlavors:                     {TopologyAwareScheduling},
 	TASNodeFeasibilityForAllLevels:                  {TopologyAwareScheduling},

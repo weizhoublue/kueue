@@ -47,6 +47,15 @@ func TestSetFeatureGatesDuringTest(t *testing.T) {
 				TASFailedNodeReplacement:         true,
 			},
 		},
+		"enable concurrent admission enables unadmitted workloads observability": {
+			input: map[featuregate.Feature]bool{
+				ConcurrentAdmission: true,
+			},
+			wantState: map[featuregate.Feature]bool{
+				ConcurrentAdmission:              true,
+				UnadmittedWorkloadsObservability: true,
+			},
+		},
 		"disable parent disables child": {
 			input: map[featuregate.Feature]bool{
 				TopologyAwareScheduling: false,

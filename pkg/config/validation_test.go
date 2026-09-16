@@ -2354,6 +2354,19 @@ func TestLoadAndValidateFeatureGates(t *testing.T) {
 				},
 			},
 		},
+		"ConcurrentAdmission requires UnadmittedWorkloadsObservability": {
+			featureGateMap: map[string]bool{
+				string(features.ConcurrentAdmission):              true,
+				string(features.UnadmittedWorkloadsObservability): false,
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:   field.ErrorTypeInvalid,
+					Field:  "featureGates",
+					Detail: "ConcurrentAdmission is enabled, but depends on features that are disabled: [UnadmittedWorkloadsObservability]",
+				},
+			},
+		},
 		"cannot set TAS profile with TAS disabled": {
 			featureGateMap: map[string]bool{
 				string(features.TASProfileMixed):                             true,
