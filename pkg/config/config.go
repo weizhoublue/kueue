@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/utils/ptr"
 	inventoryv1alpha1 "sigs.k8s.io/cluster-inventory-api/apis/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -186,12 +187,15 @@ func addLeaderElectionTo(o *ctrl.Options, cfg *configapi.Configuration) {
 // client as well, matching the manager client.
 func SetLeaderElectionConfig(o *ctrl.Options, kubeConfig *rest.Config, cfg *configapi.Configuration) {
 	leaderConfig := rest.CopyConfig(kubeConfig)
-	// Drop the shared limiter so that the REST client builds one from QPS and Burst.
+	// Drop the shared limiter so that the lease client cannot be starved by controller requests.
 	leaderConfig.RateLimiter = nil
 	leaderConfig.QPS = -1
 	if cfg.ClientConnection != nil && cfg.ClientConnection.QPS != nil && *cfg.ClientConnection.QPS >= 0 {
 		leaderConfig.QPS = *cfg.ClientConnection.QPS
 		leaderConfig.Burst = int(ptr.Deref(cfg.ClientConnection.Burst, 0))
+		if leaderConfig.QPS == 0 {
+			leaderConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(leaderConfig.QPS, leaderConfig.Burst)
+		}
 	}
 	o.LeaderElectionConfig = leaderConfig
 }

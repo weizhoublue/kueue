@@ -1546,16 +1546,23 @@ namespace: kueue-system
 
 func TestSetLeaderElectionConfig(t *testing.T) {
 	testCases := map[string]struct {
-		qps       float32
-		burst     int32
-		wantQPS   float32
-		wantBurst int
+		qps         float32
+		burst       int32
+		wantQPS     float32
+		wantBurst   int
+		wantLimiter bool
 	}{
 		"configured qps and burst are kept in a dedicated bucket": {
 			qps:       20,
 			burst:     30,
 			wantQPS:   20,
 			wantBurst: 30,
+		},
+		"zero qps keeps a dedicated zero-rate limiter": {
+			qps:         0,
+			burst:       30,
+			wantBurst:   30,
+			wantLimiter: true,
 		},
 		"negative qps disables client-side throttling for the lease client too": {
 			qps:     -1,
@@ -1589,8 +1596,14 @@ func TestSetLeaderElectionConfig(t *testing.T) {
 			if got == kubeConfig {
 				t.Error("LeaderElectionConfig is the manager rest config, want a copy")
 			}
-			if got.RateLimiter != nil {
-				t.Errorf("LeaderElectionConfig.RateLimiter = %v, want nil so the lease client builds its own limiter", got.RateLimiter)
+			if tc.wantLimiter {
+				if got.RateLimiter == nil {
+					t.Error("LeaderElectionConfig.RateLimiter is nil, want a dedicated limiter")
+				} else if got.RateLimiter == sharedLimiter {
+					t.Error("LeaderElectionConfig.RateLimiter is shared with the manager, want a dedicated limiter")
+				}
+			} else if got.RateLimiter != nil {
+				t.Errorf("LeaderElectionConfig.RateLimiter = %v, want nil", got.RateLimiter)
 			}
 			if got.QPS != tc.wantQPS || got.Burst != tc.wantBurst {
 				t.Errorf("LeaderElectionConfig QPS/Burst = %v/%v, want %v/%v", got.QPS, got.Burst, tc.wantQPS, tc.wantBurst)
