@@ -253,6 +253,7 @@ func TestApplyDefaultWorkloadPriorityClass(t *testing.T) {
 		featureGates map[featuregate.Feature]bool
 		// Nil where the case exercises a framework configured without a selector.
 		namespaceSelector      *metav1.LabelSelector
+		wpcGetErr              error
 		wantPriorityClassLabel string
 		wantErr                error
 	}{
@@ -298,6 +299,7 @@ func TestApplyDefaultWorkloadPriorityClass(t *testing.T) {
 			wpcObjects:             []client.Object{defaultWPC},
 			featureGates:           map[featuregate.Feature]bool{features.WorkloadPriorityClassDefaulting: true},
 			namespaceSelector:      &unmanagedNsSelector,
+			wpcGetErr:              boomErr,
 			wantPriorityClassLabel: "",
 		},
 		"feature gate enabled, no namespace selector configured": {
@@ -311,6 +313,7 @@ func TestApplyDefaultWorkloadPriorityClass(t *testing.T) {
 			wpcObjects:             []client.Object{defaultWPC},
 			featureGates:           map[featuregate.Feature]bool{features.WorkloadPriorityClassDefaulting: true},
 			namespaceSelector:      &unmanagedNsSelector,
+			wpcGetErr:              boomErr,
 			wantPriorityClassLabel: "",
 			wantErr:                boomErr,
 		},
@@ -326,8 +329,8 @@ func TestApplyDefaultWorkloadPriorityClass(t *testing.T) {
 			}
 			builder = builder.WithInterceptorFuncs(interceptor.Funcs{
 				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, isWPC := obj.(*kueue.WorkloadPriorityClass); isWPC && errors.Is(tc.wantErr, boomErr) {
-						return boomErr
+					if _, isWPC := obj.(*kueue.WorkloadPriorityClass); isWPC && tc.wpcGetErr != nil {
+						return tc.wpcGetErr
 					}
 					return cl.Get(ctx, key, obj, opts...)
 				},

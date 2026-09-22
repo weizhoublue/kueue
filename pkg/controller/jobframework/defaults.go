@@ -102,20 +102,18 @@ func (m *IntegrationManager) ApplyDefaultWorkloadPriorityClass(
 	if m.IsOwnerManagedByKueueForObject(jobObj) {
 		return nil
 	}
-	exists, err := utilpriority.DefaultWorkloadPriorityClassExist(ctx, k8sClient)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	// Reached only when the label is about to be set, so an object that is not a
-	// candidate costs no Namespace read.
 	managed, err := namespaceMatchesSelector(ctx, k8sClient, jobObj.GetNamespace(), managedJobsNamespaceSelector)
 	if err != nil {
 		return err
 	}
 	if !managed {
+		return nil
+	}
+	exists, err := utilpriority.DefaultWorkloadPriorityClassExist(ctx, k8sClient)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
 	jobLabels := jobObj.GetLabels()
