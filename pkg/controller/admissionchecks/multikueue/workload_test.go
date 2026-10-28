@@ -2894,6 +2894,7 @@ func TestNominateAndSynchronizeWorkers_MoreCases(t *testing.T) {
 		dispatcherMode            string
 		remotes                   map[string]*kueue.Workload
 		nominatedWorkers          []string
+		unavailableClusters       []string
 		localClusterName          *string
 		cond                      *metav1.Condition
 		createErr                 error
@@ -2931,6 +2932,33 @@ func TestNominateAndSynchronizeWorkers_MoreCases(t *testing.T) {
 			wantNominatedClusterNames: []string{remoteNames[1], remoteNames[0]}, // unchanged: set is equal, so no patch
 		},
 		// Incremental dispatcher tests were moved to a separate file.
+		{
+			name:                      "AllClusters: preserve nominations while all workers are reconnecting",
+			dispatcherMode:            config.MultiKueueDispatcherModeAllAtOnce,
+			nominatedWorkers:          []string{remoteNames[0], remoteNames[1]},
+			unavailableClusters:       []string{remoteNames[0], remoteNames[1]},
+			wantErr:                   true,
+			wantNominatedClusterNames: []string{remoteNames[0], remoteNames[1]},
+		},
+		{
+			name:                      "AllClusters: preserve reconnecting nominations while adding connected workers",
+			dispatcherMode:            config.MultiKueueDispatcherModeAllAtOnce,
+			remotes:                   map[string]*kueue.Workload{remoteNames[0]: nil},
+			nominatedWorkers:          []string{remoteNames[1]},
+			unavailableClusters:       []string{remoteNames[1]},
+			wantCreated:               []string{remoteNames[0]},
+			wantErr:                   true,
+			wantNominatedClusterNames: []string{remoteNames[0], remoteNames[1]},
+		},
+		{
+			name:                      "AllClusters: drop nominations removed from the configuration",
+			dispatcherMode:            config.MultiKueueDispatcherModeAllAtOnce,
+			remotes:                   map[string]*kueue.Workload{remoteNames[0]: nil},
+			nominatedWorkers:          []string{remoteNames[2]},
+			unavailableClusters:       []string{remoteNames[1]},
+			wantCreated:               []string{remoteNames[0]},
+			wantNominatedClusterNames: []string{remoteNames[0]},
+		},
 		{
 			name:           "External controller: no nominated workers, nothing created",
 			dispatcherMode: externalMultiKueueDispatcherController,
@@ -3006,10 +3034,11 @@ func TestNominateAndSynchronizeWorkers_MoreCases(t *testing.T) {
 				local.Status.Conditions = append(local.Status.Conditions, *tt.cond)
 			}
 			group := &wlGroup{
-				local:         local,
-				remotes:       tt.remotes,
-				remoteClients: remoteClients,
-				acName:        "ac1",
+				local:               local,
+				remotes:             tt.remotes,
+				remoteClients:       remoteClients,
+				unavailableClusters: tt.unavailableClusters,
+				acName:              "ac1",
 			}
 
 			wlRec := &wlReconciler{

@@ -942,8 +942,6 @@ func (c *clustersReconciler) setRemoteClientConfig(ctx context.Context, clusterN
 	clientLog := ctrl.LoggerFrom(c.rootContext).WithValues("clusterName", clusterName)
 	clientCtx := ctrl.LoggerInto(c.rootContext, clientLog)
 
-	hadClientBefore := client.getClient() != nil
-
 	refreshed, retryAfter, err := client.updateConfigAndRefreshWatchers(clientCtx, config)
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "failed to set kubeConfig in the remote client")
@@ -955,8 +953,8 @@ func (c *clustersReconciler) setRemoteClientConfig(ctx context.Context, clusterN
 		return retryAfter, nil
 	}
 
-	shouldResync := hadClientBefore && refreshed
-	if shouldResync || client.resyncPending {
+	// The first connection must also recover workloads persisted across a manager restart.
+	if refreshed || client.resyncPending {
 		client.resyncPending = true
 		if retryAfter := client.requeueWorkloadsForCluster(clientCtx); retryAfter != nil {
 			return retryAfter, nil

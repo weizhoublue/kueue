@@ -18,6 +18,7 @@ package multikueue
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -27,8 +28,10 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
@@ -38,6 +41,8 @@ import (
 	"sigs.k8s.io/kueue/pkg/features"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
+	"sigs.k8s.io/kueue/pkg/workload"
+	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util/behavioral"
 	"sigs.k8s.io/kueue/test/util/behavioral/integration"
 )
@@ -259,4 +264,111 @@ var _ = ginkgo.Describe("MultiKueue Reconnect", ginkgo.Label("area:multikueue", 
 			}, reconnectResyncTimeout, behavioral.Interval).Should(gomega.Succeed())
 		})
 	})
+
+	ginkgo.DescribeTable("Should resync workloads after a manager restart when remote objects were deleted", func(admitted bool) {
+		job := testingjob.MakeJob("restart-deleted-job", f.managerNs.Name).
+			Queue(kueue.LocalQueueName(f.managerLq.Name)).Obj()
+		behavioral.MustCreate(managerTestCluster.ctx, managerTestCluster.client, job)
+		wlKey := types.NamespacedName{Name: workloadjob.GetWorkloadNameForJob(job.Name, job.UID), Namespace: f.managerNs.Name}
+		admission := utiltestingapi.MakeAdmission(kueue.ClusterQueueReference(f.managerCq.Name)).
+			PodSets(utiltestingapi.MakePodSetAssignment(kueue.DefaultPodSetName).Flavor(corev1.ResourceCPU, multikueueTestFlavor).Obj())
+		if admitted {
+			admitWorkloadAndCheckWorkerCopies(f.multiKueueAC.Name, wlKey, admission)
+		} else {
+			integration.SetQuotaReservation(managerTestCluster.ctx, managerTestCluster.client, wlKey, admission.Obj())
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, wlKey, &kueue.Workload{})).To(gomega.Succeed())
+				g.Expect(worker2TestCluster.client.Get(worker2TestCluster.ctx, wlKey, &kueue.Workload{})).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		}
+
+		managerTestCluster.fwk.StopManager(managerTestCluster.ctx)
+		ginkgo.By("deleting the remote objects while the manager is stopped", func() {
+			if admitted {
+				workerJob := &batchv1.Job{}
+				gomega.Expect(worker2TestCluster.client.Get(worker2TestCluster.ctx, client.ObjectKeyFromObject(job), workerJob)).To(gomega.Succeed())
+				gomega.Expect(worker2TestCluster.client.Delete(
+					worker2TestCluster.ctx, workerJob, client.PropagationPolicy(metav1.DeletePropagationBackground),
+				)).To(gomega.Succeed())
+				behavioral.ExpectObjectToBeDeleted(worker2TestCluster.ctx, worker2TestCluster.client, workerJob, false)
+			}
+			for _, worker := range []*cluster{&worker1TestCluster, &worker2TestCluster} {
+				workerWl := utiltestingapi.MakeWorkload(wlKey.Name, wlKey.Namespace).Obj()
+				behavioral.ExpectObjectToBeDeleted(worker.ctx, worker.client, workerWl, true)
+			}
+		})
+
+		waitMessage := "Admitting remote temporarily unreachable, waiting before retry"
+		if !admitted {
+			waitMessage = "Nominated cluster not yet connected"
+		}
+		waitCount := managerTestCluster.fwk.ObservedLogs.FilterMessage(waitMessage).Len()
+		connectWorkers := make(chan struct{})
+		releaseConnections := sync.OnceFunc(func() { close(connectWorkers) })
+		defer releaseConnections()
+
+		ginkgo.By("restarting the manager with its first worker connections delayed", func() {
+			managerTestCluster.fwk.StartManager(managerTestCluster.ctx, managerTestCluster.cfg, func(ctx context.Context, mgr manager.Manager) {
+				managerAndMultiKueueSetup(ctx, mgr, 2*time.Second, defaultEnabledIntegrations, config.MultiKueueDispatcherModeAllAtOnce, multikueueac.WithWorkerLostTimeout(15*time.Minute))
+			}, framework.WithNewClient(func(cfg *rest.Config, options client.Options) (client.Client, error) {
+				baseClient, err := client.NewWithWatch(cfg, options)
+				if err != nil {
+					return nil, err
+				}
+				return interceptor.NewClient(baseClient, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*kueue.MultiKueueCluster); ok {
+							select {
+							case <-connectWorkers:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				}), nil
+			}))
+		})
+
+		ginkgo.By("waiting for the workload to take the disconnected-worker path", func() {
+			gomega.Eventually(func() int {
+				return managerTestCluster.fwk.ObservedLogs.FilterMessage(waitMessage).Len()
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.BeNumerically(">", waitCount))
+			if admitted {
+				behavioral.ExpectAdmissionCheckStateWithMessage(
+					managerTestCluster.ctx, managerTestCluster.client, wlKey,
+					f.multiKueueAC.Name, kueue.CheckStateReady, `The workload was admitted on "worker2"`,
+				)
+			} else {
+				managerWl := &kueue.Workload{}
+				gomega.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, wlKey, managerWl)).To(gomega.Succeed())
+				gomega.Expect(managerWl.Status.NominatedClusterNames).To(gomega.ConsistOf("worker1", "worker2"))
+			}
+		})
+
+		ginkgo.By("allowing the first connections and checking recovery without the periodic timeout", func() {
+			releaseConnections()
+			gomega.Eventually(func(g gomega.Gomega) {
+				managerWl := &kueue.Workload{}
+				g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, wlKey, managerWl)).To(gomega.Succeed())
+				if !admitted {
+					for _, worker := range []*cluster{&worker1TestCluster, &worker2TestCluster} {
+						remoteWl := &kueue.Workload{}
+						g.Expect(worker.client.Get(worker.ctx, wlKey, remoteWl)).To(gomega.Succeed())
+						behavioral.ExpectRemoteWorkloadSpec(g, remoteWl, managerWl)
+					}
+					return
+				}
+				evicted := apimeta.FindStatusCondition(managerWl.Status.Conditions, kueue.WorkloadEvicted)
+				g.Expect(evicted).NotTo(gomega.BeNil())
+				g.Expect(evicted.Status).To(gomega.Equal(metav1.ConditionTrue))
+				g.Expect(evicted.Reason).To(gomega.Equal(kueue.WorkloadEvictedByAdmissionCheck))
+				g.Expect(evicted.Message).To(gomega.ContainSubstring("Admitting remote no longer exists"))
+				g.Expect(workload.HasQuotaReservation(managerWl)).To(gomega.BeFalse())
+			}, reconnectResyncTimeout, behavioral.Interval).Should(gomega.Succeed())
+		})
+	},
+		ginkgo.Entry("for an admitted workload", true),
+		ginkgo.Entry("for a nominated workload awaiting admission", false),
+	)
 })

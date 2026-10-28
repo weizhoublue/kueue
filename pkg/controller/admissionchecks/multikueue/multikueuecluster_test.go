@@ -962,6 +962,94 @@ func TestDisconnectedClientReconnectsWithSameConfig(t *testing.T) {
 	}
 }
 
+func TestInitialConnectionRequeuesExistingWorkloads(t *testing.T) {
+	for _, failList := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listFailure=%t", failList), func(t *testing.T) {
+			ctx, _ := utiltesting.ContextWithLog(t)
+			cluster := utiltestingapi.MakeMultiKueueCluster("worker1").
+				KubeConfig(kueue.SecretLocationType, "worker1").Obj()
+			secret := makeTestSecret("worker1", testKubeconfig("worker1"))
+			assigned := utiltestingapi.MakeWorkload("assigned", TestNamespace).Obj()
+			assigned.Status.ClusterName = new("worker1")
+			nominated := utiltestingapi.MakeWorkload("nominated", TestNamespace).Obj()
+			nominated.Status.NominatedClusterNames = []string{"worker1", "worker2"}
+			both := utiltestingapi.MakeWorkload("both", TestNamespace).Obj()
+			both.Status.ClusterName = new("worker1")
+			both.Status.NominatedClusterNames = []string{"worker1"}
+			unrelated := utiltestingapi.MakeWorkload("unrelated", TestNamespace).Obj()
+			unrelated.Status.ClusterName = new("worker2")
+			unrelated.Status.NominatedClusterNames = []string{"worker2"}
+
+			failNextList := failList
+			localClient := getClientBuilder(ctx).
+				WithObjects(cluster, &secret, assigned, nominated, both, unrelated).
+				WithStatusSubresource(cluster).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*kueue.WorkloadList); ok && failNextList {
+							failNextList = false
+							return errors.New("manager workload list unavailable")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				}).Build()
+			reconciler := newClustersReconciler(localClient, TestNamespace)
+			reconciler.rootContext = ctx
+			reconciler.builderOverride = fakeClientBuilder(ctx)
+			t.Cleanup(func() {
+				for _, rc := range reconciler.remoteClients {
+					rc.StopWatchers()
+				}
+			})
+
+			req := reconcile.Request{Name: "worker1"}
+			result, err := reconciler.Reconcile(ctx, req)
+			if err != nil {
+				t.Fatalf("initial connection: %v", err)
+			}
+			if !reconciler.remoteClients["worker1"].connState.isConnected() {
+				t.Fatal("expected the initial connection to succeed")
+			}
+			if failList {
+				if result.RequeueAfter != resyncRetryInterval {
+					t.Fatalf("expected resync retry after %v, got %v", resyncRetryInterval, result.RequeueAfter)
+				}
+				if len(reconciler.wlUpdateCh) != 0 {
+					t.Fatal("unexpected workload events after a failed list")
+				}
+				result, err = reconciler.Reconcile(ctx, req)
+				if err != nil {
+					t.Fatalf("resync retry: %v", err)
+				}
+			}
+			if result.RequeueAfter != 0 {
+				t.Fatalf("unexpected requeue after successful resync: %v", result.RequeueAfter)
+			}
+
+			want := sets.New(client.ObjectKeyFromObject(assigned), client.ObjectKeyFromObject(nominated), client.ObjectKeyFromObject(both))
+			got := sets.New[types.NamespacedName]()
+			for len(reconciler.wlUpdateCh) > 0 {
+				e := <-reconciler.wlUpdateCh
+				key := client.ObjectKeyFromObject(e.Object)
+				if got.Has(key) {
+					t.Errorf("duplicate workload event for %v", key)
+				}
+				got.Insert(key)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("unexpected requeued workloads (-want/+got):\n%s", diff)
+			}
+
+			if _, err := reconciler.Reconcile(ctx, req); err != nil {
+				t.Fatalf("reconcile unchanged connection: %v", err)
+			}
+			if len(reconciler.wlUpdateCh) != 0 {
+				t.Fatal("unchanged connection should not requeue workloads again")
+			}
+		})
+	}
+}
+
 func TestConnectionStateTransitions(t *testing.T) {
 	now := time.Now()
 	fakeClock := testingclock.NewFakeClock(now)

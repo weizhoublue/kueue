@@ -995,6 +995,12 @@ func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group 
 		for workerName := range group.remotes {
 			nominatedWorkers = append(nominatedWorkers, workerName)
 		}
+		// Preserve existing nominations so reconnect resync can still find the workload.
+		for _, workerName := range group.unavailableClusters {
+			if slices.Contains(group.local.Status.NominatedClusterNames, workerName) {
+				nominatedWorkers = append(nominatedWorkers, workerName)
+			}
+		}
 
 		// group.remotes is a map, so iteration order is non-deterministic; sort only
 		// when we are about to persist, for a stable stored nomination.
