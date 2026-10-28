@@ -166,7 +166,7 @@ genref: gomod-download-tools ## Download genref locally if necessary.
 
 .PHONY: hugo
 hugo: gomod-download-tools ## Download hugo locally if necessary.
-	@$(NETWORK_INSTALL_RETRY) GOBIN=$(BIN_DIR) CGO_ENABLED=1 $(GO_CMD) install -tags extended github.com/gohugoio/hugo@$(HUGO_VERSION)
+	@cd $(TOOLS_DIR) && $(NETWORK_INSTALL_RETRY) GOBIN=$(BIN_DIR) CGO_ENABLED=1 $(GO_CMD) install -tags extended github.com/gohugoio/hugo
 
 .PHONY: mdtoc
 mdtoc: gomod-download-tools ## Download mdtoc locally if necessary.
