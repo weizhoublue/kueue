@@ -121,6 +121,7 @@ type wlGroup struct {
 	jobAdapter          jobframework.MultiKueueAdapter
 	controllerKey       types.NamespacedName
 	unavailableClusters []string
+	onObjectsRemoved    func(string)
 }
 
 type Option func(reconciler *wlReconciler)
@@ -175,6 +176,9 @@ func (g *wlGroup) RemoveRemoteObjects(ctx context.Context, cluster string) error
 		return err
 	}
 	g.remotes[cluster] = nil
+	if g.onObjectsRemoved != nil {
+		g.onObjectsRemoved(cluster)
+	}
 	return nil
 }
 
@@ -210,6 +214,9 @@ func (g *wlGroup) removeRemoteWorkload(ctx context.Context, cluster string) erro
 		return err
 	}
 	g.remotes[cluster] = nil
+	if g.onObjectsRemoved != nil {
+		g.onObjectsRemoved(cluster)
+	}
 	return nil
 }
 
@@ -324,6 +331,9 @@ func (w *wlReconciler) Reconcile(ctx context.Context, req reconcile.Request) (re
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	grp.onObjectsRemoved = func(clusterName string) {
+		w.forgetPreviousCluster(req.String(), clusterName)
+	}
 
 	retryCleanupAfter, err := w.removeObjectsOnPreviousClusters(ctx, grp, req.String())
 	if err != nil {
@@ -364,6 +374,10 @@ func (w *wlReconciler) removeObjectsOnPreviousClusters(ctx context.Context, grou
 	clusterNames, _ := w.previousClusterNames.Get(key)
 	var retryAfter time.Duration
 	for _, clusterName := range sets.List(clusterNames) {
+		if _, inGroup := group.remoteClients[clusterName]; inGroup {
+			// The regular flow forgets this cluster only after its remote deletion succeeds.
+			continue
+		}
 		retry, err := w.removeObjectsOnPreviousCluster(ctx, group, clusterName)
 		if err != nil {
 			return 0, err
@@ -372,23 +386,22 @@ func (w *wlReconciler) removeObjectsOnPreviousClusters(ctx context.Context, grou
 			retryAfter = w.workerLostTimeout
 			continue
 		}
-		// Drop only clusterName, so a cluster added by a concurrent eviction is kept.
-		w.previousClusterNames.UpdateOrDelete(key, func(clusterNames sets.Set[string]) (sets.Set[string], bool) {
-			remaining := clusterNames.Difference(sets.New(clusterName))
-			return remaining, remaining.Len() == 0
-		})
+		w.forgetPreviousCluster(key, clusterName)
 	}
 	return retryAfter, nil
 }
 
-// removeObjectsOnPreviousCluster deletes the remote objects on clusterName, unless the group
-// still reads that cluster or it has no MultiKueueCluster. It returns true when clusterName is
-// disconnected, so the cleanup has to be retried.
+func (w *wlReconciler) forgetPreviousCluster(key, clusterName string) {
+	// Drop only clusterName, so a cluster added by a concurrent eviction is kept.
+	w.previousClusterNames.UpdateOrDelete(key, func(clusterNames sets.Set[string]) (sets.Set[string], bool) {
+		remaining := clusterNames.Difference(sets.New(clusterName))
+		return remaining, remaining.Len() == 0
+	})
+}
+
+// removeObjectsOnPreviousCluster deletes the remote objects on a cluster outside the group.
+// It returns true when clusterName is disconnected, so the cleanup has to be retried.
 func (w *wlReconciler) removeObjectsOnPreviousCluster(ctx context.Context, group *wlGroup, clusterName string) (bool, error) {
-	if _, inGroup := group.remoteClients[clusterName]; inGroup || slices.Contains(group.unavailableClusters, clusterName) {
-		// The group reads this cluster, so the regular flow removes its remote objects.
-		return false, nil
-	}
 	rc, found := w.clusters.controllerFor(clusterName)
 	if !found {
 		// Without a MultiKueueCluster the cluster cannot be reached.

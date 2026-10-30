@@ -2559,8 +2559,11 @@ func TestRemoveObjectsOnPreviousClusters(t *testing.T) {
 		configClusters []string
 		// evictedFrom lists the clusters the workload is evicted from, in order.
 		// The workload is reconciled after each eviction.
-		evictedFrom         []string
-		worker1Disconnected bool
+		evictedFrom               []string
+		worker1Disconnected       bool
+		removeWorker1AndReconnect bool
+		// failDeleteAfterReconnect selects the Delete call to fail: Job first, then Workload.
+		failDeleteAfterReconnect int
 		// deleted delivers the delete event of the manager's workload after the reconciles.
 		deleted bool
 
@@ -2575,6 +2578,35 @@ func TestRemoveObjectsOnPreviousClusters(t *testing.T) {
 		"remote objects on a cluster in the config are left to the regular flow": {
 			configClusters: []string{"worker1", "worker2"},
 			evictedFrom:    []string{"worker1"},
+		},
+		"a disconnected cluster in the config keeps its pending cleanup until removal and reconnection": {
+			configClusters:            []string{"worker1", "worker2"},
+			evictedFrom:               []string{"worker1"},
+			worker1Disconnected:       true,
+			removeWorker1AndReconnect: true,
+			wantWorker1Objects:        true,
+			wantPreviousClusterNames:  sets.New("worker1"),
+			wantRequeueAfter:          defaultWorkerLostTimeout,
+		},
+		"a job deletion error after reconnection keeps cleanup pending across config removal": {
+			configClusters:            []string{"worker1", "worker2"},
+			evictedFrom:               []string{"worker1"},
+			worker1Disconnected:       true,
+			removeWorker1AndReconnect: true,
+			failDeleteAfterReconnect:  1,
+			wantWorker1Objects:        true,
+			wantPreviousClusterNames:  sets.New("worker1"),
+			wantRequeueAfter:          defaultWorkerLostTimeout,
+		},
+		"a workload deletion error after reconnection keeps cleanup pending across config removal": {
+			configClusters:            []string{"worker1", "worker2"},
+			evictedFrom:               []string{"worker1"},
+			worker1Disconnected:       true,
+			removeWorker1AndReconnect: true,
+			failDeleteAfterReconnect:  2,
+			wantWorker1Objects:        true,
+			wantPreviousClusterNames:  sets.New("worker1"),
+			wantRequeueAfter:          defaultWorkerLostTimeout,
 		},
 		"remote objects on a disconnected cluster removed from the config are kept for a later retry": {
 			configClusters:           []string{"worker2"},
@@ -2644,9 +2676,21 @@ func TestRemoveObjectsOnPreviousClusters(t *testing.T) {
 			adapters, _ := jobs.NewIntegrationManager().GetMultiKueueAdapters(sets.New("batch/job"))
 			cRec := newClustersReconciler(managerClient, TestNamespace, withAdapters(adapters))
 
+			deletesUntilFailure := 0
 			worker1Client := NewNeverCachingClient(getClientBuilder(ctx).
 				WithObjects(remoteWl, remoteJob).
 				WithStatusSubresource(&kueue.Workload{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if deletesUntilFailure > 0 {
+							deletesUntilFailure--
+							if deletesUntilFailure == 0 {
+								return errFake
+							}
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).
 				Build())
 			w1remoteClient := newRemoteClient(managerClient, nil, nil, nil, defaultOrigin, "worker1", adapters)
 			w1remoteClient.client = worker1Client
@@ -2707,6 +2751,39 @@ func TestRemoveObjectsOnPreviousClusters(t *testing.T) {
 			gotPreviousClusterNames, _ := reconciler.previousClusterNames.Get(req.String())
 			if diff := cmp.Diff(tc.wantPreviousClusterNames, gotPreviousClusterNames); diff != "" {
 				t.Errorf("unexpected previousClusterNames (-want/+got):\n%s", diff)
+			}
+			if tc.removeWorker1AndReconnect {
+				if tc.failDeleteAfterReconnect > 0 {
+					deletesUntilFailure = tc.failDeleteAfterReconnect
+					w1remoteClient.connState.markConnected()
+					if _, err := reconciler.Reconcile(ctx, req); !errors.Is(err, errFake) {
+						t.Fatalf("expected deletion error after reconnection, got %v", err)
+					}
+					remaining, _ := reconciler.previousClusterNames.Get(req.String())
+					if diff := cmp.Diff(sets.New("worker1"), remaining); diff != "" {
+						t.Errorf("unexpected pending cleanup after deletion error (-want/+got):\n%s", diff)
+					}
+				}
+				cfg := &kueue.MultiKueueConfig{}
+				if err := managerClient.Get(ctx, types.NamespacedName{Name: "config1"}, cfg); err != nil {
+					t.Fatalf("unexpected error reading config: %v", err)
+				}
+				cfg.Spec.Clusters = []string{"worker2"}
+				if err := managerClient.Update(ctx, cfg); err != nil {
+					t.Fatalf("unexpected error removing worker1 from config: %v", err)
+				}
+				w1remoteClient.connState.markConnected()
+				if _, err := reconciler.Reconcile(ctx, req); err != nil {
+					t.Fatalf("unexpected reconcile error after reconnection: %v", err)
+				}
+				gotWlErr = worker1Client.Get(ctx, client.ObjectKeyFromObject(remoteWl), &kueue.Workload{})
+				gotJobErr = worker1Client.Get(ctx, client.ObjectKeyFromObject(remoteJob), &batchv1.Job{})
+				if !apierrors.IsNotFound(gotWlErr) || !apierrors.IsNotFound(gotJobErr) {
+					t.Errorf("expected worker1 objects to be deleted after reconnection, got workload error %v, job error %v", gotWlErr, gotJobErr)
+				}
+				if remaining, _ := reconciler.previousClusterNames.Get(req.String()); remaining.Len() != 0 {
+					t.Errorf("unexpected pending cleanup after reconnection: %v", remaining)
+				}
 			}
 		})
 	}
