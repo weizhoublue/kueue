@@ -99,6 +99,26 @@ func TestReplacedWorkloadSliceUsage(t *testing.T) {
 	unownedNew := newSlice.DeepCopy()
 	unownedNew.OwnerReferences = nil
 
+	remoteOld := old.Clone().Label(kueue.MultiKueueOriginLabel, "manager").Obj()
+	remoteOld.OwnerReferences[0].UID = "worker-job-uid"
+	unownedRemoteOld := remoteOld.DeepCopy()
+	unownedRemoteOld.OwnerReferences = nil
+	remoteOldFinished := remoteOld.DeepCopy()
+	remoteOldFinished.Status.Conditions = oldSliceFinished.Status.Conditions
+	remoteNew := replacement.Clone().Label(kueue.MultiKueueOriginLabel, "manager").Obj()
+	remoteNew.OwnerReferences = nil
+	ownedRemoteNew := remoteNew.DeepCopy()
+	ownedRemoteNew.OwnerReferences = remoteOld.OwnerReferences
+	otherOrigin := ownedRemoteNew.DeepCopy()
+	otherOrigin.Labels[kueue.MultiKueueOriginLabel] = "other-manager"
+	otherRemoteChain := remoteNew.DeepCopy()
+	otherRemoteChain.Annotations[kueue.WorkloadSliceNameAnnotation] = "other-chain"
+	remoteTasOld := tasOld.DeepCopy()
+	remoteTasOld.Labels = map[string]string{kueue.MultiKueueOriginLabel: "manager"}
+	remoteTasNew := tasNew.DeepCopy()
+	remoteTasNew.Labels = map[string]string{kueue.MultiKueueOriginLabel: "manager"}
+	remoteTasNew.OwnerReferences = nil
+
 	type step struct {
 		add, finish, del *kueue.Workload // finish is a Finished copy of a cached workload
 		delIfUnchanged   *kueue.Workload
@@ -158,6 +178,49 @@ func TestReplacedWorkloadSliceUsage(t *testing.T) {
 			steps: []step{
 				{add: unownedOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
 				{add: unownedNew, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
+			},
+		},
+		"MultiKueue slices are charged once before and after Job adoption": {
+			steps: []step{
+				{add: unownedRemoteOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: remoteOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: remoteNew, wantCPU: "3", wantWorkloads: []workload.Reference{"ns/new"}},
+				{add: ownedRemoteNew, wantCPU: "3", wantWorkloads: []workload.Reference{"ns/new"}},
+				{del: ownedRemoteNew, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: remoteNew, wantCPU: "3", wantWorkloads: []workload.Reference{"ns/new"}},
+				{finish: remoteOldFinished, wantCPU: "3", wantWorkloads: []workload.Reference{"ns/new"}},
+				{del: remoteNew, wantCPU: "0"},
+			},
+		},
+		"MultiKueue slices from another manager are charged": {
+			steps: []step{
+				{add: remoteOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: otherOrigin, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
+			},
+		},
+		"MultiKueue slices of another chain are charged": {
+			steps: []step{
+				{add: remoteOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: otherRemoteChain, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
+			},
+		},
+		"MultiKueue and local slices are charged separately": {
+			steps: []step{
+				{add: oldSlice, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: ownedRemoteNew, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
+			},
+		},
+		"MultiKueue TAS slices are both charged": {
+			steps: []step{
+				{add: remoteTasOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: remoteTasNew, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
+			},
+		},
+		"gate off charges both MultiKueue slices": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: false},
+			steps: []step{
+				{add: remoteOld, wantCPU: "2", wantWorkloads: []workload.Reference{"ns/old"}},
+				{add: remoteNew, wantCPU: "5", wantWorkloads: []workload.Reference{"ns/new", "ns/old"}},
 			},
 		},
 		"another Workload at the replaced slice's key is charged": {

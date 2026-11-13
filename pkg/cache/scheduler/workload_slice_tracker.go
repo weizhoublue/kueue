@@ -27,20 +27,29 @@ import (
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
-// sliceChainKey identifies a chain of workload slices: the slices of a job share its namespace,
-// its controller and their slice name.
+// sliceChainKey identifies a chain of workload slices by namespace and slice name,
+// scoped to a controller or a MultiKueue origin.
 type sliceChainKey struct {
 	namespace  string
 	controller types.UID
+	origin     string
 	sliceName  string
 }
 
 // sliceChainOf returns the chain of workload slice wi. It returns false for Workloads that are not
 // slices, and for TAS slices, whose Pods a newer slice may not cover on the same nodes.
 func sliceChainOf(wi *workload.Info) (sliceChainKey, bool) {
-	owner := metav1.GetControllerOfNoCopy(wi.Obj)
 	name := wi.Obj.Annotations[kueue.WorkloadSliceNameAnnotation]
-	if owner == nil || name == "" || wi.IsUsingTAS() {
+	if name == "" || wi.IsUsingTAS() {
+		return sliceChainKey{}, false
+	}
+	// Remote slices are adopted by the worker Job only after admission.
+	// Use their origin to keep the chain stable before and after adoption.
+	if origin := wi.Obj.Labels[kueue.MultiKueueOriginLabel]; origin != "" {
+		return sliceChainKey{namespace: wi.Obj.Namespace, origin: origin, sliceName: name}, true
+	}
+	owner := metav1.GetControllerOfNoCopy(wi.Obj)
+	if owner == nil {
 		return sliceChainKey{}, false
 	}
 	return sliceChainKey{namespace: wi.Obj.Namespace, controller: owner.UID, sliceName: name}, true
