@@ -18,22 +18,29 @@ package scheduler
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/controller/constants"
+	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	workloadjob "sigs.k8s.io/kueue/pkg/controller/jobs/job"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/testing"
@@ -41,6 +48,9 @@ import (
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
 	"sigs.k8s.io/kueue/pkg/workload"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
+	workloadfinish "sigs.k8s.io/kueue/pkg/workload/finish"
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
+	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util/behavioral"
 )
 
@@ -219,6 +229,144 @@ var _ = ginkgo.Describe("MultiKueue with scheduler", ginkgo.Label("area:multikue
 		behavioral.ExpectObjectToBeDeleted(managerTestCluster.ctx, managerTestCluster.client, workerCluster2, true)
 		behavioral.ExpectObjectToBeDeleted(managerTestCluster.ctx, managerTestCluster.client, managerMultiKueueSecret1, true)
 		behavioral.ExpectObjectToBeDeleted(managerTestCluster.ctx, managerTestCluster.client, managerMultiKueueSecret2, true)
+	})
+
+	ginkgo.It("should charge MultiKueue elastic slices once before the replacement is adopted", func() {
+		features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.ElasticJobsViaWorkloadSlices, true)
+
+		for _, clusterQueue := range []struct {
+			cluster *cluster
+			queue   *kueue.ClusterQueue
+		}{
+			{&managerTestCluster, managerCq},
+			{&worker1TestCluster, worker1Cq},
+		} {
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(clusterQueue.cluster.client.Get(clusterQueue.cluster.ctx, client.ObjectKeyFromObject(clusterQueue.queue), clusterQueue.queue)).To(gomega.Succeed())
+				clusterQueue.queue.Spec.ResourceGroups[0].Flavors[0].Resources[0].NominalQuota = resource.MustParse("4")
+				g.Expect(clusterQueue.cluster.client.Update(clusterQueue.cluster.ctx, clusterQueue.queue)).To(gomega.Succeed())
+			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		}
+
+		replacementAssumed := make(chan struct{})
+		admissionReleased := make(chan struct{})
+		releaseAdmission := sync.OnceFunc(func() { close(admissionReleased) })
+		var notifyAssumed sync.Once
+		var workerCache *schdcache.Cache
+		namespace := managerNs.Name
+		defer func() {
+			releaseAdmission()
+			worker1TestCluster.fwk.StopManager(worker1TestCluster.ctx)
+			worker1TestCluster.fwk.StartManager(worker1TestCluster.ctx, worker1TestCluster.cfg, managerSetup)
+		}()
+		worker1TestCluster.fwk.StopManager(worker1TestCluster.ctx)
+		worker1TestCluster.fwk.StartManager(worker1TestCluster.ctx, worker1TestCluster.cfg, func(ctx context.Context, mgr manager.Manager) {
+			_, workerCache = setupManager(ctx, mgr)
+		}, framework.WithNewClient(func(cfg *rest.Config, options client.Options) (client.Client, error) {
+			baseClient, err := client.NewWithWatch(cfg, options)
+			if err != nil {
+				return nil, err
+			}
+			return interceptor.NewClient(baseClient, interceptor.Funcs{
+				SubResourceApply: func(ctx context.Context, c client.Client, subResource string, applyConf runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+					applied := &kueue.Workload{}
+					if err := testing.DecodeApplyConfiguration(applyConf, applied); err != nil {
+						return err
+					}
+					if subResource == "status" && applied.Namespace == namespace && applied.Status.Admission != nil {
+						current := &kueue.Workload{}
+						if err := c.Get(ctx, client.ObjectKeyFromObject(applied), current); err != nil {
+							return err
+						}
+						if workloadslicing.ReplacementForKey(current) != nil {
+							// Hold the admission write after assumption, before Job adoption or old-slice completion.
+							notifyAssumed.Do(func() { close(replacementAssumed) })
+							select {
+							case <-admissionReleased:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						}
+					}
+					return c.SubResource(subResource).Apply(ctx, applyConf, opts...)
+				},
+			}), nil
+		}))
+
+		job := testingjob.MakeJob("elastic-job", managerNs.Name).
+			Parallelism(2).Completions(3).
+			RequestAndLimit(corev1.ResourceCPU, "1").
+			SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+			Queue(kueue.LocalQueueName(managerLq.Name)).
+			Obj()
+		behavioral.MustCreate(managerTestCluster.ctx, managerTestCluster.client, job)
+		jobKey := client.ObjectKeyFromObject(job)
+		oldKey := types.NamespacedName{
+			Namespace: job.Namespace,
+			Name:      jobframework.GetWorkloadNameForOwnerWithGVKAndGeneration(job.Name, job.UID, batchv1.SchemeGroupVersion.WithKind("Job"), job.Generation),
+		}
+		oldSlice := &kueue.Workload{}
+		remoteJob := &batchv1.Job{}
+		ginkgo.By("waiting for the initial two-CPU slice to be admitted and adopted on worker1")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, oldKey, oldSlice)).To(gomega.Succeed())
+			g.Expect(workload.IsAdmitted(oldSlice)).To(gomega.BeTrue())
+			g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, jobKey, remoteJob)).To(gomega.Succeed())
+			g.Expect(metav1.IsControlledBy(oldSlice, remoteJob)).To(gomega.BeTrue())
+			g.Expect(remoteJob.Spec.Suspend).To(gomega.Equal(new(false)))
+			g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, jobKey, job)).To(gomega.Succeed())
+			g.Expect(job.Spec.Suspend).To(gomega.Equal(new(false)))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("scaling the Job to three CPUs and pausing the worker's replacement admission")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, jobKey, job)).To(gomega.Succeed())
+			job.Spec.Parallelism = new(int32(3))
+			g.Expect(managerTestCluster.client.Update(managerTestCluster.ctx, job)).To(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		replacement := behavioral.ExpectNewWorkloadSlice(managerTestCluster.ctx, managerTestCluster.client, oldSlice)
+		replacementKey := client.ObjectKeyFromObject(replacement)
+		gomega.Eventually(replacementAssumed, behavioral.Timeout, behavioral.Interval).Should(gomega.BeClosed())
+
+		ginkgo.By("checking that the unowned replacement and the unfinished old slice charge only three CPUs")
+		gomega.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, replacementKey, replacement)).To(gomega.Succeed())
+		gomega.Expect(replacement.OwnerReferences).To(gomega.BeEmpty())
+		gomega.Expect(workload.HasQuotaReservation(replacement)).To(gomega.BeFalse())
+		gomega.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, oldKey, oldSlice)).To(gomega.Succeed())
+		gomega.Expect(workload.IsAdmitted(oldSlice)).To(gomega.BeTrue())
+		gomega.Expect(workloadfinish.IsFinished(oldSlice)).To(gomega.BeFalse())
+		usage, err := workerCache.Usage(worker1Cq)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(usage.ReservedResources[0].Resources[0].Total.Cmp(resource.MustParse("3"))).
+			To(gomega.BeZero(), "reserved CPU: %s", usage.ReservedResources[0].Resources[0].Total.String())
+		gomega.Expect(usage.ReservingWorkloads).To(gomega.Equal(1))
+
+		ginkgo.By("admitting another Job with the remaining CPU while the replacement write is still blocked")
+		otherJob := testingjob.MakeJob("other-job", worker1Ns.Name).
+			RequestAndLimit(corev1.ResourceCPU, "1").
+			Queue(kueue.LocalQueueName(worker1Lq.Name)).
+			Obj()
+		behavioral.MustCreate(worker1TestCluster.ctx, worker1TestCluster.client, otherJob)
+		otherSlice := &kueue.Workload{}
+		otherKey := types.NamespacedName{Namespace: otherJob.Namespace, Name: workloadjob.GetWorkloadNameForJob(otherJob.Name, otherJob.UID)}
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, otherKey, otherSlice)).To(gomega.Succeed())
+			g.Expect(workload.IsAdmitted(otherSlice)).To(gomega.BeTrue())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("releasing admission and completing the slice handover without changing the total charge")
+		releaseAdmission()
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, replacementKey, replacement)).To(gomega.Succeed())
+			g.Expect(workload.IsAdmitted(replacement)).To(gomega.BeTrue())
+			g.Expect(metav1.IsControlledBy(replacement, remoteJob)).To(gomega.BeTrue())
+			g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, oldKey, oldSlice)).To(gomega.Succeed())
+			g.Expect(workloadfinish.IsFinished(oldSlice)).To(gomega.BeTrue())
+			usage, err := workerCache.Usage(worker1Cq)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(usage.ReservedResources[0].Resources[0].Total.Cmp(resource.MustParse("4"))).To(gomega.BeZero())
+			g.Expect(usage.ReservingWorkloads).To(gomega.Equal(2))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	})
 
 	ginkgo.It("should preempt a running low-priority workload when a high-priority workload is admitted (same worker)", func() {

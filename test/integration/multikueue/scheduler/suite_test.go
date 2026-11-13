@@ -117,7 +117,7 @@ func managerSetup(ctx context.Context, mgr manager.Manager) {
 	setupManager(ctx, mgr)
 }
 
-func setupManager(ctx context.Context, mgr manager.Manager) *jobframework.IntegrationManager {
+func setupManager(ctx context.Context, mgr manager.Manager) (*jobframework.IntegrationManager, *schdcache.Cache) {
 	ginkgo.GinkgoHelper()
 	integrationManager := jobframework.NewIntegrationManager()
 	gomega.Expect(workloadjob.RegisterIntegration(integrationManager)).To(gomega.Succeed())
@@ -188,7 +188,7 @@ func setupManager(ctx context.Context, mgr manager.Manager) *jobframework.Integr
 	err = mgr.Add(sched)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	return integrationManager
+	return integrationManager, cCache
 }
 
 func managerAndMultiKueueSetup(
@@ -199,7 +199,7 @@ func managerAndMultiKueueSetup(
 	dispatcherName string,
 ) {
 	ginkgo.GinkgoHelper()
-	integrationManager := setupManager(ctx, mgr)
+	integrationManager, _ := setupManager(ctx, mgr)
 
 	err := multikueue.SetupIndexer(ctx, mgr.GetFieldIndexer(), managersConfigNamespace.Name)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
